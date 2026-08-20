@@ -198,6 +198,16 @@ p.lead{color:var(--txt2);font-size:13px;margin:0 0 18px;line-height:1.5}
     <div id="sumBox"></div>
     <button class="btn btn-primary" style="margin-top:18px" id="btnEnviar">Finalizar e enviar</button>
     <button class="btn btn-ghost" style="margin-top:10px" id="btnFinVoltar">Voltar à avaliação</button>
+    <div id="envioStatus" class="hint" style="margin-top:14px;text-align:center;font-weight:700"></div>
+  </div>
+
+  <!-- ENVIADO -->
+  <div class="screen" id="s-enviado">
+    <div style="text-align:center;padding:44px 12px">
+      <div style="width:84px;height:84px;border-radius:50%;background:#e7f7ef;color:var(--verde);font-size:44px;display:flex;align-items:center;justify-content:center;margin:0 auto 18px">✓</div>
+      <h1 class="t" style="margin:0 0 8px">Avaliação enviada</h1>
+      <p class="lead" style="margin:0 auto;max-width:340px">Obrigado! Seus lançamentos foram enviados com sucesso.<br><br>Por segurança, este dispositivo <b>não guarda mais</b> os dados desta avaliação.</p>
+    </div>
   </div>
 </div>
 
@@ -219,7 +229,9 @@ p.lead{color:var(--txt2);font-size:13px;margin:0 0 18px;line-height:1.5}
 "use strict";
 (function(){
 /* ===== Config de envio (próximo passo: Apps Script) ===== */
-var UPLOAD_URL = ""; /* deixar vazio até termos o endpoint do Apps Script */
+var UPLOAD_URL = "https://script.google.com/macros/s/AKfycbw0VVrOsTUbIKuHYLp6Qu0hBO91W6MbTyBe9WoU6CpGGQnzAXuEX0KvbqouQ68rJzDIZw/exec";
+var MAX_FOTOS = 3;   /* máximo de fotos por número/cultivar */
+var LOTE = 5;        /* números por lote de envio */
 
 /* ===== Escalas (padrão DAGMA / seed gtm1) ===== */
 var ESCALAS = [
@@ -275,7 +287,7 @@ function fotoDel(id){try{var t=db.transaction("fotos","readwrite");t.objectStore
 
 /* ===== Util ===== */
 function $(id){return document.getElementById(id);}
-function show(scr){["s-home","s-prep","s-ident","s-eval","s-finish"].forEach(function(s){
+function show(scr){["s-home","s-prep","s-ident","s-eval","s-finish","s-enviado"].forEach(function(s){
   $(s).classList.toggle("on",s===scr);});
   $("bar").classList.toggle("on",scr==="s-eval");
   window.scrollTo(0,0);}
@@ -408,14 +420,21 @@ function renderThumbs(card,n){
     t.appendChild(x);box.appendChild(t);
   });
   var add=document.createElement("button");add.className="addphoto";
-  add.innerHTML='<span>+</span>foto';
-  add.onclick=function(){abrirCamera(n,card);};
+  if((r.fotos||[]).length>=MAX_FOTOS){
+    add.disabled=true; add.style.opacity=".45"; add.style.cursor="default";
+    add.innerHTML='<span>✓</span>máx. '+MAX_FOTOS;
+  } else {
+    add.innerHTML='<span>+</span>foto';
+    add.onclick=function(){abrirCamera(n,card);};
+  }
   box.appendChild(add);
 }
 var camAlvo=null,camCard=null;
 function abrirCamera(n,card){camAlvo=n;camCard=card;$("camInput").value="";$("camInput").click();}
 $("camInput").addEventListener("change",function(e){
   var f=e.target.files&&e.target.files[0];if(!f||camAlvo==null)return;
+  var rr=respostas[camAlvo]||{};
+  if((rr.fotos||[]).length>=MAX_FOTOS){toast("Limite de "+MAX_FOTOS+" fotos por número");return;}
   comprimir(f).then(function(bl){
     if(!bl){toast("Não consegui processar a foto");return;}
     var fid=(eventoId||"_")+"__"+camAlvo+"_"+Date.now();
@@ -457,24 +476,83 @@ function renderFinish(){
   if(pend>0)h+='<div class="sumrow"><span>Pendentes</span><span class="badge-pend">'+pend+' sem nota completa</span></div>';
   $("sumBox").innerHTML=h;
 }
-function montarPayload(){
-  return{campo:{nome:campo.nome,meta:campo.meta},avaliador:avaliador,
-    quando:new Date().toISOString(),
-    itens:campo.itens.map(function(it){var r=respostas[it.n]||{};
-      return{n:it.n,mat:it.mat,gm:it.gm,pop:it.pop,
+/* ===== Envio em lotes (opção B): fila, retomada e apagar-após-enviar ===== */
+function itemByN(n){ for(var i=0;i<campo.itens.length;i++){ if(campo.itens[i].n===n) return campo.itens[i]; } return {n:n,mat:"",gm:"",pop:""}; }
+function avaliado(n){ var r=respostas[n]; return !!(r && (r.porte||r.ram||r.visual||r.unif||r.sani||r.obs||(r.fotos&&r.fotos.length))); }
+function blobToDataURL(bl){ return new Promise(function(res){ var fr=new FileReader(); fr.onload=function(){res(fr.result);}; fr.onerror=function(){res("");}; fr.readAsDataURL(bl); }); }
+function eventoPayload(){ var m=campo.meta||{}; return {id:eventoId, data:m.dia_campo||m.data||"", cidade:(m.municipio||campo.nome||"").split("/")[0].trim(), fazenda:m.fazenda||""}; }
+function montarItem(n){
+  var r=respostas[n]||{}, it=itemByN(n), fids=r.fotos||[];
+  return Promise.all(fids.map(function(fid){return fotoGet(fid).then(function(bl){return bl?blobToDataURL(bl):"";});}))
+    .then(function(fotos){
+      return {n:n,mat:it.mat,gm:it.gm,pop:it.pop,
         porte:r.porte||"",ram:r.ram||"",visual:r.visual||"",unif:r.unif||"",sani:r.sani||"",
-        obs:r.obs||"",fotos:(r.fotos||[]).length};})};
+        obs:r.obs||"",fotos:fotos.filter(Boolean)};
+    });
 }
+function postLote(itensBatch){
+  return fetch(UPLOAD_URL,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},
+    body:JSON.stringify({evento:eventoPayload(),avaliador:avaliador,itens:itensBatch})})
+    .then(function(r){return r.text();})
+    .then(function(t){ var j=null; try{j=JSON.parse(t);}catch(e){} if(j&&j.ok) return true; throw new Error(j&&j.erro?j.erro:"resposta inválida"); });
+}
+var enviando=false;
+function setEnvioUI(txt, disable){ $("envioStatus").textContent=txt||""; $("btnEnviar").disabled=!!disable; $("btnEnviar").style.opacity=disable?".6":"1"; }
 function enviar(){
-  var payload=montarPayload();
-  if(!UPLOAD_URL){
-    kvSet("ultimo_envio",payload);
-    toast("Salvo no aparelho — envio online no próximo passo");
-    return;
-  }
-  /* fila + envio automático (implementação real no próximo passo) */
-  toast("Enviando…");
+  if(enviando) return;
+  if(!UPLOAD_URL){ toast("Envio não configurado"); return; }
+  kvGet("envio:"+eventoId).then(function(st){
+    if(!st){
+      var pend=campo.itens.map(function(it){return it.n;}).filter(avaliado);
+      if(!pend.length){ toast("Nada avaliado para enviar"); return null; }
+      st={total:pend.length, pendentes:pend};
+      kvSet("envio:"+eventoId, st);
+    }
+    return st;
+  }).then(function(st){ if(st) processarFila(); });
 }
+function processarFila(){
+  enviando=true;
+  $("btnEnviar").textContent="Enviando…";
+  kvGet("envio:"+eventoId).then(function(st){
+    if(!st || !st.pendentes || !st.pendentes.length){ enviando=false; return finalizarEnvio(); }
+    var enviados=st.total - st.pendentes.length;
+    setEnvioUI("Enviando… "+enviados+" de "+st.total, true);
+    var lote=st.pendentes.slice(0, LOTE);
+    Promise.all(lote.map(montarItem))
+      .then(postLote)
+      .then(function(){
+        lote.forEach(function(n){
+          var r=respostas[n]||{};
+          (r.fotos||[]).forEach(function(fid){ fotoDel(fid); });
+          delete respostas[n];
+        });
+        saveDraft();
+        st.pendentes=st.pendentes.slice(lote.length);
+        kvSet("envio:"+eventoId, st);
+        processarFila();
+      })
+      .catch(function(err){
+        enviando=false;
+        setEnvioUI("Sem conexão — aguardando rede para continuar. Nada foi perdido.", false);
+        $("btnEnviar").textContent="Tentar enviar novamente";
+      });
+  });
+}
+function finalizarEnvio(){
+  kvSet("enviado:"+eventoId, true);
+  kvSet("envio:"+eventoId, null);
+  kvSet(draftKey(), null);
+  respostas={};
+  setEnvioUI("", false);
+  show("s-enviado");
+}
+window.addEventListener("online",function(){
+  if(!eventoId || enviando) return;
+  kvGet("enviado:"+eventoId).then(function(done){ if(done) return;
+    kvGet("envio:"+eventoId).then(function(st){ if(st && st.pendentes && st.pendentes.length) processarFila(); });
+  });
+});
 
 /* ===== Navegação ===== */
 $("btnStart").onclick=function(){if(!campo){toast("Prepare o campo primeiro");show("s-prep");return;}show("s-ident");};
@@ -563,7 +641,10 @@ function entrarEvento(c){
   campo=c; eventoId=c.id||"evento"; modoAvaliador=true;
   kvSet("evento:"+eventoId,c);          /* guarda o croqui no aparelho */
   kvSet("ultimo_evento",eventoId);       /* lembra p/ reabrir offline */
-  return carregarRascunho().then(function(){renderHome();show("s-home");});
+  return kvGet("enviado:"+eventoId).then(function(done){
+    if(done){ renderHome(); show("s-enviado"); return; }   /* já enviado: avaliador cego */
+    return carregarRascunho().then(function(){renderHome();show("s-home");});
+  });
 }
 function boot(){
   var hash=(location.hash||"").replace(/^#/,"");
